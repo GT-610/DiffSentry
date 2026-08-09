@@ -3,7 +3,7 @@ import { Config, AIProvider, DiffBudgetConfig, FileChange, PRContext, PriorRevie
 import { buildProvider, ProviderSpec } from "./ai/provider-factory.js";
 import { FailoverProvider } from "./ai/failover.js";
 import { isAiTimeoutError } from "./ai/timeout.js";
-import { GitHubClient, REVIEW_STATUS_CONTEXT, isReviewFeedbackAddressed, type ReviewThreadSummary } from "./github.js";
+import { GitHubClient, REVIEW_STATUS_CONTEXT, type ReviewThreadSummary } from "./github.js";
 import { assessShipSignals, renderShipCheck, resolveReviewStatus, type CommitStatusLike, type ThreadGate } from "./ship-check.js";
 import { loadRepoConfig, mergeWithDefaults, shouldReviewPR, isPathIncluded } from "./repo-config.js";
 import { formatWalkthrough, formatWalkthroughInner, wrapWalkthroughCollapse, formatPRSummary, injectSummaryIntoPRBody } from "./walkthrough.js";
@@ -27,9 +27,10 @@ import { formatReviewBody, reconcileApproval } from "./review-body.js";
 import { encodeState, encodeStateRef, extractState, isTrivialPatch, WalkthroughState } from "./walkthrough-state.js";
 import { assessRisk, renderRiskBlock, assessCoverage, renderCoverageBlock, shouldSuggestSplit, renderSplitSuggestion, renderConfidenceAggregate, computeReviewerDeltas, renderReviewerDeltaBlock, calibrateSeverities, resolveSeverityCalibration, renderSeverityCalibrationBlock, type CalibrationResult } from "./insights.js";
 import { suggestReviewersFromBlame, renderSuggestedReviewers, combineReviewers, renderCombinedReviewers } from "./blame-reviewers.js";
-import { loadCodeowners, ownersForFiles, renderCodeownersBlock } from "./codeowners.js";
+import { loadCodeowners, ownersForFiles } from "./codeowners.js";
 import { findPriorBotThreadsForPaths, renderPriorDiscussionsBlock, diffWithOtherPR, renderDiffPRReply } from "./cross-pr.js";
 import { renderStickyStatus, STICKY_MARKER } from "./sticky-status.js";
+import { RELEASE_NOTES_PROMPT, sanitiseReleaseNotes } from "./release-notes.js";
 import { recordRepo, recordPR, recordReview, recordFindings, recordPatternHits, recordIssue, recordIssueAction, getSuppressedFingerprints, listCustomRulesForRepo, deleteReviewJob, getWalkthroughState, saveWalkthroughState } from "./storage/dao.js";
 import { runSafetyScanners } from "./safety-scanner.js";
 import { runPatternChecks } from "./pattern-checks.js";
@@ -2437,26 +2438,9 @@ Only include sections that have entries. Each bullet is one short past-tense sen
           const octokit = await this.github.getInstallationOctokit(installationId);
           const rawConfig = await loadRepoConfig(octokit, owner, repo, context.defaultBranch || "HEAD");
           const repoConfig = mergeWithDefaults(rawConfig);
-          const ask = `Write public release notes for this PR. Audience: end users / customers, not engineers.
-
-Format:
-
-### ✨ What's new
-<2-3 bullets of user-visible improvements in plain English. Lead with the benefit, not the implementation.>
-
-### 🛠 Improvements
-<bullets — performance, reliability, polish>
-
-### 🐛 Fixes
-<bullets — only include when there are real fixes>
-
-### 💔 Breaking changes
-<only when actually breaking; otherwise omit the section>
-
-Skip sections with no content. No code blocks, no acronyms without expansion, no internal jargon ("refactored", "unblocked", "leveraged").`;
-          const response = await this.ai.chat(context, ask, repoConfig);
+          const response = await this.ai.chat(context, RELEASE_NOTES_PROMPT, repoConfig);
           await reply(
-            `# 📣 Release Notes\n\n${response.trim()}\n\n<sub>Marketing-speak version of this PR. Re-run with \`@${this.config.botName} release-notes\`.</sub>`,
+            `# Release Notes\n\n${sanitiseReleaseNotes(response)}\n\n<sub>Drafted from the diff on this PR. Re-run with \`@${this.config.botName} release-notes\`.</sub>`,
           );
           break;
         }
