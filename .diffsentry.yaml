@@ -339,3 +339,6 @@ issues:
     on_edit: false
   chat:
     auto_reply: true
+
+release_notes:
+  auto: true
