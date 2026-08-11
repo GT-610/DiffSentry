@@ -3,6 +3,7 @@ import { Octokit } from "@octokit/rest";
 import { Config, FileChange, PRContext, ReviewComment, ReviewResult, IssueContext, IssueComment } from "./types.js";
 import { logger } from "./logger.js";
 import { isFileLevelFinding, REVIEW_BODY_MARKER } from "./review-body.js";
+import { injectSummaryIntoPRBody } from "./walkthrough.js";
 import {
   parseThreadSeverity,
   parseThreadFingerprint,
@@ -1220,21 +1221,69 @@ export class GitHubClient {
     }
   }
 
-  async updatePRDescription(
+  /**
+   * Merge DiffSentry's summary block into the PR description, rebasing on the
+   * body as it is *right now*.
+   *
+   * Callers only supply the block; they deliberately cannot supply the body to
+   * merge it into. A review runs for minutes, so the description a caller
+   * captured before the model calls started is stale by the time the summary
+   * exists, and writing that snapshot back silently reverted whatever the
+   * author edited in between — including edits made in response to DiffSentry's
+   * own description findings, which were then re-raised against text DiffSentry
+   * itself had restored. This is the only way to write the description, so
+   * there is no longer a "write this exact body" entry point for a future
+   * caller to reintroduce that bug through.
+   *
+   * One window survives and cannot be closed: an edit saved between the read
+   * below and GitHub applying the PATCH is still lost. GitHub offers no
+   * compare-and-swap here — a conditional header on this endpoint is rejected
+   * outright rather than evaluated:
+   *
+   *     PATCH /repos/{owner}/{repo}/pulls/{n}   If-Match: W/"<the live etag>"
+   *     400 {"errors":["Conditional request headers are not allowed in unsafe
+   *          requests unless supported by the endpoint"]}
+   *
+   * So the mitigation is to keep the window short: the PATCH goes through the
+   * same `octokit` as the read. `getInstallationOctokit` builds a fresh client
+   * each call, and a fresh client mints a new installation token on its first
+   * request, which would put a whole auth round trip inside the gap.
+   *
+   * Returns true when a write actually happened.
+   */
+  async upsertSummaryInPRDescription(
     installationId: number,
     owner: string,
     repo: string,
     pullNumber: number,
-    body: string,
+    summary: string,
     signal?: AbortSignal
-  ): Promise<void> {
+  ): Promise<boolean> {
     const octokit = await this.getInstallationOctokit(installationId, signal);
-    await octokit.pulls.update({
-      owner,
-      repo,
-      pull_number: pullNumber,
-      body,
-    });
+    const log = logger.child({ owner, repo, pr: pullNumber });
+
+    let currentBody: string;
+    try {
+      const pr = await octokit.pulls.get({ owner, repo, pull_number: pullNumber });
+      currentBody = pr.data.body ?? "";
+    } catch (err) {
+      // Nothing safe to merge onto: the only body we could fall back to is the
+      // stale snapshot this method exists to avoid. Leave the description as
+      // the author left it; the next review retries with a fresh read.
+      log.warn({ err }, "Could not read PR description; leaving it untouched");
+      return false;
+    }
+
+    const newBody = injectSummaryIntoPRBody(currentBody, summary);
+    if (newBody === currentBody) {
+      // A re-review of an unchanged PR shouldn't churn the description —
+      // each write notifies watchers and fires another pull_request.edited.
+      log.debug("PR description summary already current; skipping write");
+      return false;
+    }
+
+    await octokit.pulls.update({ owner, repo, pull_number: pullNumber, body: newBody });
+    return true;
   }
 
   async getFileContent(
