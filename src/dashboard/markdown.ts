@@ -41,6 +41,10 @@ const SANITIZE_OPTIONS: sanitizeHtml.IOptions = {
     details: ["open"],
   },
   allowedSchemes: ["http", "https", "mailto"],
+  // Tags without a per-tag entry fall back to the global list above, which
+  // already covers img — but spelling out img keeps the policy pinned even if
+  // a future sanitize-html version ships its own img-specific scheme defaults.
+  allowedSchemesByTag: { img: ["http", "https"] },
   allowProtocolRelative: false,
   transformTags: {
     input: (_tagName, attribs) => {

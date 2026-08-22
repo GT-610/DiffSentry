@@ -56,6 +56,22 @@ describe("renderMarkdown — XSS vectors", () => {
     expect(out).not.toMatch(/href=(["']?)\s*\/\//);
   });
 
+  it("applies the scheme allowlist to image sources too", () => {
+    // Pin the img policy explicitly: no data: URLs may survive in src,
+    // regardless of what sanitize-html's per-tag defaults do in future
+    // versions (DOMPurify, the SPA's sanitizer, permits data: images by
+    // default — this server-side config must never drift that way).
+    for (const raw of [
+      '<img src="data:image/svg+xml,<svg onload=alert(1)>">',
+      '<img src="DATA:image/png;base64,iVBOR">',
+    ]) {
+      const out = renderMarkdown(raw);
+      expect(out).not.toMatch(/src=/i);
+      expect(out).not.toContain("data:");
+      expect(out).not.toContain("alert");
+    }
+  });
+
   it("neutralizes raw html links whose scheme is not allowlisted", () => {
     const out = renderMarkdown('<a href="data:text/html,<script>alert(1)</script>">x</a>');
     expect(out).not.toContain("data:");
