@@ -62,8 +62,8 @@ describe("renderMarkdown — XSS vectors", () => {
     // versions (DOMPurify, the SPA's sanitizer, permits data: images by
     // default — this server-side config must never drift that way).
     for (const raw of [
-      '<img src="data:image/svg+xml,<svg onload=alert(1)>">',
-      '<img src="DATA:image/png;base64,iVBOR">',
+      '<img alt="" src="data:image/svg+xml,<svg onload=alert(1)>">',
+      '<img alt="" src="DATA:image/png;base64,iVBOR">',
     ]) {
       const out = renderMarkdown(raw);
       expect(out).not.toMatch(/src=/i);
