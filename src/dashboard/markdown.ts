@@ -32,7 +32,9 @@ const SANITIZE_OPTIONS: sanitizeHtml.IOptions = {
   allowedAttributes: {
     a: ["href", "title"],
     img: ["src", "alt", "title"],
-    input: ["type", "checked", "disabled"],
+    // Belt-and-braces alongside the transformTags rule below: even if an
+    // input element survives the transform, its type can only be "checkbox".
+    input: ["checked", "disabled", { name: "type", values: ["checkbox"] }],
     th: ["align"],
     td: ["align"],
     code: ["class"], // language-* classes emitted by fenced code blocks
@@ -40,6 +42,23 @@ const SANITIZE_OPTIONS: sanitizeHtml.IOptions = {
   },
   allowedSchemes: ["http", "https", "mailto"],
   allowProtocolRelative: false,
+  transformTags: {
+    input: (_tagName, attribs) => {
+      // GFM task lists are the only input element our rendered content relies
+      // on, and they always emit <input ... type="checkbox">. Any other input
+      // — text boxes, radios, submits, or a typeless <input> (which browsers
+      // default to "text") — is attacker dressing rather than bot content.
+      // A plain values-constraint is not enough on its own: sanitize-html
+      // responds to a disallowed value by emptying the attribute but keeping
+      // the element, and type="" still renders as a visible text box. Fold
+      // non-checkbox inputs into an attribute-less span instead so no form
+      // control survives.
+      if ((attribs.type || "") !== "checkbox") {
+        return { tagName: "span", attribs: {} };
+      }
+      return { tagName: "input", attribs };
+    },
+  },
 };
 
 export function renderMarkdown(input: string | null | undefined): string {

@@ -89,6 +89,24 @@ describe("renderMarkdown — benign markdown survives", () => {
     expect(out).toMatch(/<input disabled type="checkbox" \/> todo/);
   });
 
+  it("collapses non-checkbox inputs into inert spans", () => {
+    // The PR surface is input[type=checkbox]; text boxes, radios, submits,
+    // and a typeless <input> (browsers default it to "text") must not survive
+    // as live form controls.
+    for (const raw of [
+      '<input type="text" value="pwn">',
+      "<input>",
+      '<input type="submit" value="Go">',
+      '<input type="radio" name="x">',
+      '<input type="TEXT">',
+    ]) {
+      const out = renderMarkdown(raw);
+      expect(out).not.toContain("<input");
+      expect(out).not.toMatch(/\btype\b/);
+      expect(out).not.toContain("pwn");
+    }
+  });
+
   it("keeps http, https and mailto links", () => {
     const out = renderMarkdown("[site](https://example.com) [mail](mailto:a@b.c)");
     expect(out).toContain('href="https://example.com"');
