@@ -45,7 +45,7 @@ describe("renderMarkdown — XSS vectors", () => {
   });
 
   it("strips inline event handlers", () => {
-    const raw = '<img src="https://example.com/a.png" onerror="alert(1)">';
+    const raw = '<img src="https://example.com/a.png" alt="" onerror="alert(1)">';
     const out = renderMarkdown(raw);
     expect(out).not.toContain("onerror");
     expect(out).toContain("https://example.com/a.png");
