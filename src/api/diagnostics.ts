@@ -4,7 +4,7 @@ import type { Role } from "../dashboard/roles.js";
 import { getActor } from "../dashboard/roles.js";
 import type { CsrfRuntime } from "../dashboard/auth.js";
 import { loadAuthConfigFromEnv } from "../dashboard/auth.js";
-import { AI_PROVIDERS, DEFAULT_ANTHROPIC_MODEL, DEFAULT_OPENAI_MODEL } from "../config.js";
+import { AI_PROVIDERS, DEFAULT_ANTHROPIC_MODEL, DEFAULT_OPENAI_MODEL, isValidGitHubAppId } from "../config.js";
 import { signWebhookPayload, verifyWebhookSignature } from "../webhook/signature.js";
 import { insertAuditLog } from "../storage/dao.js";
 import { openDatabase } from "../storage/db.js";
@@ -107,15 +107,21 @@ function buildChecks(authEnabled: boolean, persistenceEnabled: boolean): Diagnos
   const checks: DiagnosticCheck[] = [];
 
   // ── GitHub App ──────────────────────────────────────────────────
+  const rawAppId = process.env.GITHUB_APP_ID?.trim() ?? "";
+  const appIdNumeric = isValidGitHubAppId(rawAppId);
   checks.push({
     id: "github.app_id",
     category: "github",
     label: "GitHub App ID",
-    status: envSet("GITHUB_APP_ID") ? "ok" : "fail",
-    detail: envSet("GITHUB_APP_ID") ? "GITHUB_APP_ID is set." : "GITHUB_APP_ID is not set.",
-    fixHint: envSet("GITHUB_APP_ID")
+    status: appIdNumeric ? "ok" : "fail",
+    detail: !rawAppId
+      ? "GITHUB_APP_ID is not set."
+      : appIdNumeric
+        ? "GITHUB_APP_ID is a numeric App ID."
+        : `GITHUB_APP_ID is set but not numeric (got: "${process.env.GITHUB_APP_ID}"). GitHub requires the JWT iss claim to be an integer.`,
+    fixHint: appIdNumeric
       ? undefined
-      : "Copy the numeric App ID from your GitHub App's settings page into GITHUB_APP_ID.",
+      : "Copy the numeric App ID from your GitHub App's settings page into GITHUB_APP_ID — not the Client ID (Iv23li…) and not the app slug.",
   });
 
   const pk = privateKeyState();
