@@ -38,6 +38,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   branch" box and edit it once to dispatch codegen commands that commit to the
   PR's head branch. The created-comment path already filtered bot authors; the
   edit path now does too.
+- A non-numeric `GITHUB_APP_ID` (a stray prefix, the OAuth Client ID, the app
+  slug) no longer boots and then fails every GitHub call with an opaque 401
+  (`'Issuer' claim ('iss') must be an Integer'`). `loadConfig()` rejects it at
+  startup, and the diagnostics GitHub App ID check fails the same way instead
+  of reporting "set" as healthy.
 
 - A PR description that so much as *mentions* DiffSentry's summary marker is no
   longer partly deleted by the next review. `injectSummaryIntoPRBody` located
