@@ -85,8 +85,15 @@ export class LearningsStore {
   }
 
   async getLearnings(repo: string): Promise<Learning[]> {
-    const fp = this.filePath(repo);
     try {
+      // filePath() throws on a segment that fails validation. That must stay
+      // inside the try: this is the read path, and both callers reach it with
+      // unvalidated input — the legacy GET /repo/:owner/:repo route passes
+      // req.params straight through, and the reviewer calls it inside a
+      // Promise.all where a throw would fail the whole review. Reads degrade
+      // to "no learnings"; writeLearnings still throws, so a traversal path
+      // can never be written.
+      const fp = this.filePath(repo);
       const data = await fs.readFile(fp, "utf-8");
       const parsed: unknown = JSON.parse(data);
       // A hand-edited or corrupt file holding a JSON object (not an array)
