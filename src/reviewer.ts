@@ -19,12 +19,13 @@ import {
   stripFences,
 } from "./ai/parse.js";
 import { verifyFindings } from "./ai/verify.js";
-import { LearningsStore, synthesizeLearning, extractFindingMeta, type FindingContext } from "./learnings.js";
+import { LearningsStore, synthesizeLearning, extractFindingMeta, formatFindingLocation, type FindingContext } from "./learnings.js";
 import { parseIssueReferences, fetchLinkedIssues, formatIssuesForWalkthrough } from "./issues.js";
 import { runPreMergeChecks, formatCheckResults, getOverallStatus } from "./pre-merge.js";
 import { generateDocstrings, generateTests, simplifyCode, autofix } from "./finishing-touches.js";
 import { formatReviewBody, reconcileApproval, isVisiblyActionable, isQuietOverflow } from "./review-body.js";
 import { encodeState, encodeStateRef, extractState, replaceState, isTrivialPatch, WalkthroughState } from "./walkthrough-state.js";
+import { addressedCommitRange, renderAddressedNote, stampRaisedShas } from "./addressed-commits.js";
 import { assessRisk, renderRiskVerdict, renderRiskFactors, assessCoverage, renderCoverageBlock, shouldSuggestSplit, renderSplitSuggestion, renderConfidenceAggregate, computeReviewerDeltas, renderReviewerDeltaBlock, calibrateSeverities, resolveSeverityCalibration, renderSeverityCalibrationBlock, type CalibrationResult } from "./insights.js";
 import { suggestReviewersFromBlame, renderSuggestedReviewers, combineReviewers, renderCombinedReviewers } from "./blame-reviewers.js";
 import { loadCodeowners, ownersForFiles } from "./codeowners.js";
@@ -203,6 +204,28 @@ export function dropContextOnlyFindings(
   const contextOnly = new Set(prior.files.map((f) => f.filename));
   return comments.filter((c) => c.prLevel || !c.path || !contextOnly.has(c.path));
 }
+
+/**
+ * What DiffSentry says when a review-thread conversation ends the finding.
+ *
+ * It already decides this and already acts on it — the judge below asks whether
+ * the exchange settled the suggestion, then collapses the thread. What it did
+ * not do was say so. A thread that folds shut mid-conversation with no word
+ * reads as a glitch, and the failure case was worse: when the mutation was
+ * refused the thread simply stayed open, looking to the author exactly like one
+ * DiffSentry had decided to leave open on purpose.
+ *
+ * This is NOT the same machinery as the `✅ Addressed in commit(s) …` note.
+ * That one is triggered by a push, needs per-finding commit state to say
+ * anything, and names commits. This one is triggered by a conversation, needs
+ * no persisted state at all, and is a receipt for a mutation just attempted.
+ * They share only an outcome. Both strings are transcribed from the captured
+ * corpus (`tests/e2e/reference/2026-09/coderabbit/inline.md:982`;
+ * `2026-09/drift.md:191` for the failure form).
+ */
+export const THREAD_RESOLVED_NOTE = "✅ Review thread resolved.";
+export const THREAD_RESOLVE_FAILED_NOTE =
+  "I couldn't resolve this review thread on the repository platform, so it remains open. Please retry or resolve it manually.";
 
 const WALKTHROUGH_START = "<!-- walkthrough_start -->";
 const WALKTHROUGH_END = "<!-- walkthrough_end -->";
@@ -461,8 +484,28 @@ export class Reviewer {
       const ctx = await this.github.getPRContext(installationId, owner, repo, pullNumber);
       const changedFiles = ctx.files.map((f) => f.filename);
       if (changedFiles.length === 0) return;
+
+      // One lazy read of the state, shared by the two things that need it: the
+      // addressed note, which runs while the threads are still open, and the
+      // retirement, which runs once they are closed. Shared so the two see the
+      // same snapshot, and lazy so a push that resolves nothing still costs
+      // nothing — `addressedNote` is only ever called for a thread about to be
+      // closed, so on the common quiet push neither the comment nor the commit
+      // list is fetched at all.
+      let statePromise: ReturnType<Reviewer["loadWalkthroughStateFor"]> | null = null;
+      const loadState = () =>
+        (statePromise ??= this.loadWalkthroughStateFor(installationId, owner, repo, pullNumber));
+
+      let notePromise: Promise<((fingerprint: string) => string | null) | undefined> | null = null;
+      const addressedNote = async (fingerprint: string): Promise<string | null> => {
+        notePromise ??= loadState().then((loaded) =>
+          this.buildAddressedNote(installationId, owner, repo, pullNumber, loaded?.state),
+        );
+        return (await notePromise)?.(fingerprint) ?? null;
+      };
+
       const { resolved, fingerprints, paths } = await this.github.resolveAddressedThreads(
-        installationId, owner, repo, pullNumber, changedFiles
+        installationId, owner, repo, pullNumber, changedFiles, { addressedNote }
       );
       if (resolved > 0) {
         log.info({ resolved }, "Push auto-resolve: closed addressed threads");
@@ -470,12 +513,63 @@ export class Reviewer {
         // this reads the state to build its dedup set and its skip list, and
         // either one left standing would suppress the re-raise of a finding
         // this just closed on nothing but a file having changed.
-        await this.retireResolvedThreadState(installationId, owner, repo, pullNumber, fingerprints, paths);
+        await this.retireResolvedThreadState(await loadState(), installationId, owner, repo, pullNumber, fingerprints, paths);
         await this.syncReviewCommitStatus(installationId, owner, repo, pullNumber, { headSha: ctx.headSha });
       }
     } catch (err) {
       log.warn({ err }, "Push auto-resolve failed");
     }
+  }
+
+  /**
+   * The walkthrough comment and the state it carries, preferring the database
+   * row the review pass writes first. Returns null when neither exists — a PR
+   * whose walkthrough predates state, or one DiffSentry has never reviewed.
+   */
+  private async loadWalkthroughStateFor(
+    installationId: number,
+    owner: string,
+    repo: string,
+    pullNumber: number,
+  ): Promise<{ comment: { id: number; body: string } | null; state: WalkthroughState } | null> {
+    const comment = await this.github
+      .findCommentByMarker(installationId, owner, repo, pullNumber, WALKTHROUGH_MARKER)
+      .catch(() => null);
+    const state = getWalkthroughState(owner, repo, pullNumber) ?? extractState(comment?.body);
+    if (!state) return null;
+    return { comment, state };
+  }
+
+  /**
+   * A function from a finding's fingerprint to the `✅ Addressed in commit(s) …`
+   * line for the thread carrying it, or undefined when no thread on this PR can
+   * produce one.
+   *
+   * Short-circuits before the commit fetch whenever the state holds no
+   * `findingShas` — the field is new, so every PR reviewed before it shipped
+   * lands here, and those PRs must cost exactly what they cost yesterday rather
+   * than an extra paginated API call per push forever.
+   */
+  private async buildAddressedNote(
+    installationId: number,
+    owner: string,
+    repo: string,
+    pullNumber: number,
+    state: WalkthroughState | undefined,
+  ): Promise<((fingerprint: string) => string | null) | undefined> {
+    const findingShas = state?.findingShas;
+    if (!findingShas || Object.keys(findingShas).length === 0) return undefined;
+    let shas: string[];
+    try {
+      shas = (await this.github.listPRCommits(installationId, owner, repo, pullNumber)).map((c) => c.sha);
+    } catch (err) {
+      logger.child({ owner, repo, pr: pullNumber }).warn({ err }, "Could not list PR commits for the addressed note");
+      return undefined;
+    }
+    return (fingerprint: string) => {
+      const range = addressedCommitRange(findingShas[fingerprint], shas);
+      return range ? renderAddressedNote(range) : null;
+    };
   }
 
   /**
@@ -503,6 +597,7 @@ export class Reviewer {
    * `autoResolveOnPush` from reaching the commit-status sync.
    */
   private async retireResolvedThreadState(
+    loaded: { comment: { id: number; body: string } | null; state: WalkthroughState } | null,
     installationId: number,
     owner: string,
     repo: string,
@@ -513,17 +608,21 @@ export class Reviewer {
     if (fingerprints.length === 0 && paths.length === 0) return;
     const log = logger.child({ owner, repo, pr: pullNumber });
     try {
-      const comment = await this.github
-        .findCommentByMarker(installationId, owner, repo, pullNumber, WALKTHROUGH_MARKER)
-        .catch(() => null);
-      const priorState = getWalkthroughState(owner, repo, pullNumber) ?? extractState(comment?.body);
-      if (!priorState) return;
+      if (!loaded) return;
+      const { comment, state: priorState } = loaded;
 
       const retiringFps = new Set(fingerprints);
       const keptFps = (priorState.postedFingerprints ?? []).filter((fp) => !retiringFps.has(fp));
       const retiringPaths = new Set(paths);
       const keptShas = Object.fromEntries(
         Object.entries(priorState.fileShas ?? {}).filter(([path]) => !retiringPaths.has(path)),
+      );
+      // The raised-at SHA goes with the fingerprint it belongs to. Left behind,
+      // it would be stale the moment the finding is re-raised on a later push:
+      // the range would start from the first raise rather than the latest, and
+      // name commits the reader already saw the thread survive.
+      const keptFindingShas = Object.fromEntries(
+        Object.entries(priorState.findingShas ?? {}).filter(([fp]) => !retiringFps.has(fp)),
       );
 
       const droppedFps = (priorState.postedFingerprints ?? []).length - keptFps.length;
@@ -536,6 +635,7 @@ export class Reviewer {
         ...priorState,
         ...(priorState.postedFingerprints ? { postedFingerprints: keptFps } : {}),
         ...(priorState.fileShas ? { fileShas: keptShas } : {}),
+        ...(priorState.findingShas ? { findingShas: keptFindingShas } : {}),
         updatedAt: new Date().toISOString(),
       };
       saveWalkthroughState(owner, repo, pullNumber, nextState);
@@ -2054,16 +2154,20 @@ export class Reviewer {
         // Internal state blob (base64(gzip(JSON))) for incremental review.
         const riskHistory = (priorState?.riskHistory ?? []).slice(-19);
         riskHistory.push(risk.score);
+        const postedFingerprints = Array.from(
+          new Set([
+            ...(priorState?.postedFingerprints ?? []),
+            ...reviewResult.comments.map((c) => c.fingerprint).filter((x): x is string => !!x),
+          ]),
+        );
         const newState: WalkthroughState = {
           v: 1,
           lastReviewedSha: context.headSha,
           fileShas: { ...(priorState?.fileShas ?? {}), ...currentFileShas },
-          postedFingerprints: Array.from(
-            new Set([
-              ...(priorState?.postedFingerprints ?? []),
-              ...reviewResult.comments.map((c) => c.fingerprint).filter((x): x is string => !!x),
-            ]),
-          ),
+          postedFingerprints,
+          // Dates each finding so push auto-resolve can later name the commits
+          // that landed after it was raised. See stampRaisedShas.
+          findingShas: stampRaisedShas(priorState?.findingShas, postedFingerprints, context.headSha),
           // Trailing window, most-recent last: a PR-level finding that stopped
           // recurring 50 findings ago is not worth suppressing forever, and the
           // list is compared token-wise (not hashed), so it has to stay bounded.
@@ -2715,7 +2819,14 @@ export class Reviewer {
             saved = { content: rawNote };
           }
 
-          const stored = await this.learnings.addLearning(repoFullName, saved.content, saved.path);
+          // Provenance, recorded now because it is unrecoverable later: the
+          // rendered learning has no back-reference to the thread it came from,
+          // and a learning nobody can trace is one nobody can decide to retire.
+          const stored = await this.learnings.addLearning(repoFullName, saved.content, saved.path, {
+            author: findingCtx?.noteAuthor,
+            prNumber: pullNumber,
+            sourceFile: findingCtx?.findingLocation ?? findingCtx?.file,
+          });
           const scopeLine = stored.path
             ? `Scope: \`${stored.path}\``
             : "Scope: repo-wide";
@@ -2933,7 +3044,13 @@ Output ONLY valid JSON (no fences, no prose):
           const rawConfig = await loadRepoConfig(octokit, owner, repo, context.defaultBranch || "HEAD");
           const repoConfig = mergeWithDefaults(rawConfig);
           const response = await this.ai.chat(context, command.message, repoConfig);
-          await reply(response);
+
+          // The outcome note is appended to the reply rather than posted after
+          // it, so the reader gets one comment saying both what DiffSentry
+          // thinks and what it did — which is the shape the corpus captures.
+          // The cost is that the reply waits on the judge below; one comment
+          // that tells the whole truth is worth one model call of latency.
+          let outcomeNote: string | null = null;
 
           // If the user replied inside a bot-started review thread, ask the AI
           // whether the exchange resolves the original suggestion (either by
@@ -2967,6 +3084,7 @@ Output ONLY valid JSON (no fences, no prose):
                   const ok = await this.github.resolveThreadById(
                     installationId, owner, repo, pullNumber, thread.threadId
                   );
+                  outcomeNote = ok ? THREAD_RESOLVED_NOTE : THREAD_RESOLVE_FAILED_NOTE;
                   if (ok) {
                     log.info({ threadId: thread.threadId }, "Auto-resolved thread after acknowledged reply");
                     // That may have been the last open thread — if so the
@@ -2984,6 +3102,8 @@ Output ONLY valid JSON (no fences, no prose):
               log.warn({ err }, "Thread-reply auto-resolve failed");
             }
           }
+
+          await reply(outcomeNote ? `${response}\n\n${outcomeNote}` : response);
           break;
         }
 
@@ -3626,12 +3746,16 @@ After Why 5, write a single paragraph **"## Root cause"** stating the structural
     const botLogin = this.config.botName.toLowerCase();
     let cursor: number | null = commentId;
     let lastSeen: { body?: string; path?: string } | null = null;
+    // The first hop is the note itself, so its author is the maintainer doing
+    // the teaching. Captured before the walk climbs past it.
+    let noteAuthor: string | undefined;
     for (let hop = 0; hop < 5 && cursor !== null; hop++) {
       const cur: Awaited<ReturnType<typeof octokit.pulls.getReviewComment>> =
         await octokit.pulls.getReviewComment({ owner, repo, comment_id: cursor });
       const data = cur.data;
       const author = (data.user?.login ?? "").toLowerCase();
       const isBot = data.user?.type === "Bot" && author.includes(botLogin);
+      if (hop === 0 && !isBot) noteAuthor = data.user?.login ?? undefined;
       if (isBot) {
         const meta = extractFindingMeta(data.body);
         return {
@@ -3639,6 +3763,8 @@ After Why 5, write a single paragraph **"## Root cause"** stating the structural
           findingBody: data.body ?? undefined,
           findingTitle: meta.title,
           rule: meta.rule,
+          noteAuthor,
+          findingLocation: formatFindingLocation(data.path, data.start_line, data.line),
         };
       }
       lastSeen = { body: data.body ?? undefined, path: data.path ?? undefined };
@@ -3646,7 +3772,7 @@ After Why 5, write a single paragraph **"## Root cause"** stating the structural
     }
     // Couldn't find a bot ancestor — at least surface the file path so the
     // synthesizer can scope by directory.
-    return lastSeen?.path ? { file: lastSeen.path } : null;
+    return lastSeen?.path ? { file: lastSeen.path, noteAuthor } : null;
   }
 
   // ─── Issue Helpers ───────────────────────────────────────────
