@@ -260,11 +260,13 @@ You MUST respond with valid JSON matching this schema:
   ],
   "cohorts": [
     {
+      "theme": "Packaging and release",
       "label": "Build & Distribution",
       "files": ["package.json", "README.md"],
       "summary": "Reworked npm scripts, added cross-env, updated electron-builder config."
     }
   ],
+  "changeType": "bug_fix",
   "effortEstimate": 3,
   "effortMinutes": 25,
   "sequenceDiagrams": [
@@ -279,12 +281,15 @@ Rules:
 - "summary" must be 1-2 short sentences in past tense (e.g. "Adds cross-platform build scripts and patches node-pty for Windows.").
 - "fileDescriptions" must cover ALL changed files (used as a fallback when cohorts omit a file).
 - "cohorts" groups changed files into 1-8 thematic clusters. Each cohort:
+  - "theme": 2-6 word sentence-case phrase naming the broader concern this cohort serves, with no emoji. Cohorts sharing a theme are rendered as one table under it, so use 1-3 themes for the whole PR and reuse the exact same string for every cohort in a theme. Omit the field when the PR only does one thing.
   - "label": 2-5 word category in title case (no emoji). Examples: "Build & Distribution", "Native rebuild / postinstall", "UI zoom IPC & persistence".
   - "files": array of file paths belonging to this cohort. Every changed file must appear in exactly one cohort.
   - "summary": 1-2 sentence description of what changed across these files.
+- "changeType": what kind of change the PR as a whole is — exactly one of "bug_fix", "feature", "other". Omit the field if none of the three fits; do not invent a fourth value.
 - "effortEstimate": 1-5 where 1=Trivial, 2=Simple, 3=Moderate, 4=Complex, 5=Very Complex.
 - "effortMinutes": rough integer estimate of review minutes (e.g. 5, 15, 30, 60, 120).
 - "sequenceDiagrams": array of 0-3 Mermaid sequenceDiagram blocks showing key flows introduced/modified. Omit (empty array) if the changes don't involve a clear interaction flow. Each entry is a complete sequenceDiagram (without surrounding triple backticks). Do NOT put semicolons (\`;\`) inside message labels — Mermaid treats them as statement terminators and the diagram will fail to render (e.g. write "TL/DR" or "summary" instead of "TL;DR").
+- Each diagram must use AT MOST 5 participants, and their displayed names must total AT MOST 64 characters across the whole diagram. GitHub renders these in a fixed-width comment column and Mermaid gives every participant its own column with no wrapping, so a sixth participant — or five verbose ones — runs off the right edge and is cut off where the reader sees it. Prefer the shortest name that is still unambiguous ("Sanitizer", not "Allowlist Sanitizer"; "Dashboard", not "Legacy Dashboard"), and merge or drop peripheral participants rather than adding a column.
 - "suggestedLabels": from common labels: bug, enhancement, refactor, docs, test, performance, security, breaking-change, dependencies. Only suggest what fits.
 - "suggestedReviewers": leave empty (no team data available).
 - "poem": short (4-6 line) poem starting with rabbit emoji. Each line ends with two trailing spaces. Empty string if not requested.

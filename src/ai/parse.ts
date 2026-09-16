@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { PRContext, ReviewComment, ReviewResult, WalkthroughResult, CommentType, CommentSeverity, CommentCategory, CommentEffort, Confidence } from "../types.js";
+import { PRContext, ReviewComment, ReviewResult, WalkthroughResult, CommentType, CommentSeverity, CommentCategory, CommentEffort, ChangeType, Confidence } from "../types.js";
 import { logger } from "../logger.js";
 import {
   VALID_SEVERITIES,
@@ -168,6 +168,19 @@ const EFFORT_ICON: Record<CommentEffort, string> = {
   quick_win: "⚡",
   heavy_lift: "🏗️",
   low_value: "💤",
+};
+
+const VALID_CHANGE_TYPES: ChangeType[] = ["bug_fix", "feature", "other"];
+
+/**
+ * The walkthrough-level change axis. Transcribed like the two above: the corpus
+ * writes `**Change:** Bug fix` in sentence case and attaches no glyph to it,
+ * unlike every per-finding axis, so neither is invented here.
+ */
+export const CHANGE_TYPE_LABEL: Record<ChangeType, string> = {
+  bug_fix: "Bug fix",
+  feature: "Feature",
+  other: "Other",
 };
 
 export function normalizeForFingerprint(s: string): string {
@@ -930,6 +943,12 @@ export function parseWalkthroughResponse(raw: string): WalkthroughResult {
           label: c.label,
           files: c.files.filter((f: any) => typeof f === "string"),
           summary: typeof c.summary === "string" ? c.summary : "",
+          // Optional and free-text, so it is only length-bounded — a theme is a
+          // rendered heading, and an essay in that slot is worse than none.
+          theme:
+            typeof c.theme === "string" && c.theme.trim().length > 0
+              ? c.theme.trim().slice(0, 80)
+              : undefined,
         }))
     : undefined;
 
@@ -941,6 +960,12 @@ export function parseWalkthroughResponse(raw: string): WalkthroughResult {
       changeDescription: fd.changeDescription || "",
     })),
     cohorts,
+    // Same contract as the per-finding axes: an omitted or unrecognized value
+    // becomes `undefined`, so the walkthrough renders one line shorter rather
+    // than printing `**Change:** undefined`.
+    changeType: VALID_CHANGE_TYPES.includes(parsed.changeType as ChangeType)
+      ? (parsed.changeType as ChangeType)
+      : undefined,
     effortEstimate: typeof parsed.effortEstimate === "number"
       ? Math.min(5, Math.max(1, Math.round(parsed.effortEstimate)))
       : undefined,

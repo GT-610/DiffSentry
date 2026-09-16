@@ -108,28 +108,83 @@ function riskLevel(score: number): RiskAssessment["level"] {
   return "low";
 }
 
-export function renderRiskBlock(risk: RiskAssessment): string {
-  const badge: Record<RiskAssessment["level"], string> = {
-    low: "🟢 Low",
-    moderate: "🟡 Moderate",
-    elevated: "🟠 Elevated",
-    high: "🔴 High",
-    critical: "🚨 Critical",
-  };
+const RISK_BADGE: Record<RiskAssessment["level"], string> = {
+  low: "🟢 Low",
+  moderate: "🟡 Moderate",
+  elevated: "🟠 Elevated",
+  high: "🔴 High",
+  critical: "🚨 Critical",
+};
+
+/** Markers bracketing the top-level verdict, so a later pass can find and
+ *  replace it without re-rendering the walkthrough it sits under. Named after
+ *  CodeRabbit's (`tests/e2e/reference/2026-09/coderabbit/walkthrough.md:113`)
+ *  so the parity corpus classifier reads one vocabulary across both bots. */
+export const RISK_VERDICT_START = "<!-- final_review_risk_start -->";
+export const RISK_VERDICT_END = "<!-- final_review_risk_end -->";
+
+/**
+ * The one sentence of judgement that has to survive the collapse.
+ *
+ * DiffSentry has always computed a risk score, and has always buried it: the
+ * September corpus has it on 10 of 10 walkthroughs, and on every one of them it
+ * is the fifth `##` section *inside* the `📝 Walkthrough` `<details>`
+ * (`tests/e2e/reference/2026-09/screenshots/diffsentry/walkthrough-collapsed.png`
+ * shows the result — three collapsed rows and no verdict). CodeRabbit puts
+ * `**Merge Risk:** _🟠 High_ · up to `50f8b`` plus a prose rationale at the top
+ * level of the same comment, 15 of 15, outside every `<details>`.
+ *
+ * So this is a decision about what deserves top level, not a new capability.
+ * The verdict, the score and a rationale go above the fold; the factor table
+ * that justifies them stays inside, where a reader who wants the arithmetic
+ * can open it (see {@link renderRiskFactors}).
+ *
+ * The rationale is derived from the factors rather than asked of the model:
+ * the factors are already labelled prose, a second opinion could contradict the
+ * score sitting next to it, and a walkthrough must still render when the model
+ * call fails.
+ */
+export function renderRiskVerdict(risk: RiskAssessment, headSha?: string): string {
+  const sha = headSha ? ` · up to \`${headSha.slice(0, 7)}\`` : "";
+  const lines: string[] = [
+    RISK_VERDICT_START,
+    `**Merge Risk:** _${RISK_BADGE[risk.level]}_ · ${risk.score}/100${sha}`,
+    "",
+    riskRationale(risk),
+    RISK_VERDICT_END,
+  ];
+  return lines.join("\n");
+}
+
+/** Prose for the top three factors by weight, naming how many were left out. */
+function riskRationale(risk: RiskAssessment): string {
+  if (risk.factors.length === 0) return "No elevated risk signals detected.";
+
+  // Stable sort (V8 guarantees it), so equal weights keep assessRisk's own
+  // order — findings first, then paths, size, effort, tests.
+  const ranked = [...risk.factors].sort((a, b) => b.weight - a.weight);
+  const top = ranked.slice(0, 3).map((f) => `${f.label} (+${f.weight})`);
+  const named =
+    top.length === 1 ? top[0] : `${top.slice(0, -1).join(", ")} and ${top[top.length - 1]}`;
+  const rest = ranked.length - top.length;
+  const more = rest > 0 ? `, and ${rest} more factor${rest === 1 ? "" : "s"}` : "";
+  return `Driven by ${named}${more}. Full breakdown in the walkthrough.`;
+}
+
+/**
+ * The arithmetic behind the verdict, rendered inside the walkthrough collapse.
+ * Empty when there is nothing to break down — the verdict line already said
+ * "No elevated risk signals detected." and a table of nothing repeats it.
+ */
+export function renderRiskFactors(risk: RiskAssessment): string {
+  if (risk.factors.length === 0) return "";
   const lines: string[] = [];
-  lines.push(`## Risk Assessment`);
+  lines.push(`**Risk factors** — ${risk.score}/100, ${RISK_BADGE[risk.level]}`);
   lines.push("");
-  lines.push(`**Score: ${risk.score}/100** — ${badge[risk.level]}`);
-  if (risk.factors.length === 0) {
-    lines.push("");
-    lines.push("No elevated risk signals detected.");
-  } else {
-    lines.push("");
-    lines.push("| Factor | Weight | Detail |");
-    lines.push("|---|---|---|");
-    for (const f of risk.factors) {
-      lines.push(`| ${f.label} | +${f.weight} | ${f.detail} |`);
-    }
+  lines.push("| Factor | Weight | Detail |");
+  lines.push("|---|---|---|");
+  for (const f of risk.factors) {
+    lines.push(`| ${f.label} | +${f.weight} | ${f.detail} |`);
   }
   return lines.join("\n");
 }
@@ -184,7 +239,7 @@ export function renderCoverageBlock(c: CoverageSignal): string {
   if (c.productionFiles === 0 && c.testFiles === 0) return "";
   const icon = c.flag === "missing" ? "🔴" : c.flag === "warn" ? "🟡" : "🟢";
   const lines: string[] = [];
-  lines.push(`## Test Coverage Signal`);
+  lines.push(`**Test coverage signal**`);
   lines.push("");
   lines.push(`${icon} ${c.detail}`);
   lines.push("");
@@ -486,7 +541,7 @@ export function renderSeverityCalibrationBlock(result: CalibrationResult): strin
   if (result.adjustments.length === 0 && result.confidenceLowered === 0) return "";
   const arrow = (a: SeverityAdjustment) => (SEVERITY_ORDER.indexOf(a.to) > SEVERITY_ORDER.indexOf(a.from) ? "⬆️" : "⬇️");
   const lines: string[] = [];
-  lines.push("## ⚖️ Severity calibration");
+  lines.push("**⚖️ Severity calibration**");
   lines.push("");
   lines.push(
     "Some findings were re-weighted by **blast radius** (fan-in) and **test coverage** so severity reflects real risk, not just finding type:",
@@ -532,7 +587,7 @@ export function renderConfidenceAggregate(review: ReviewResult): string {
   }
   if (counts.medium === 0 && counts.low === 0) return "";
   const total = review.comments.length;
-  return `## 📊 Confidence breakdown\n\n${total} finding${total === 1 ? "" : "s"} — 🟢 ${counts.high} high · 🟡 ${counts.medium} medium · 🔴 ${counts.low} low. Treat the medium / low ones as hypotheses to verify.`;
+  return `**📊 Confidence breakdown**\n\n${total} finding${total === 1 ? "" : "s"} — 🟢 ${counts.high} high · 🟡 ${counts.medium} medium · 🔴 ${counts.low} low. Treat the medium / low ones as hypotheses to verify.`;
 }
 
 // ─── Reviewer-delta block (what changed since each reviewer last looked) ──
@@ -569,7 +624,7 @@ export function computeReviewerDeltas(opts: {
 export function renderReviewerDeltaBlock(deltas: ReviewerDelta[]): string {
   if (deltas.length === 0) return "";
   const lines: string[] = [];
-  lines.push("## 🔁 Changes since last reviewed");
+  lines.push("**🔁 Changes since last reviewed**");
   lines.push("");
   for (const d of deltas) {
     lines.push(`- @${d.reviewer}: ${d.filesChanged} file(s) changed since their last review`);
@@ -581,7 +636,7 @@ export function renderReviewerDeltaBlock(deltas: ReviewerDelta[]): string {
 
 export function renderSplitSuggestion(cohorts: Array<{ label: string; files: string[] }>): string {
   const lines: string[] = [];
-  lines.push(`## 💡 Suggested PR Split`);
+  lines.push(`**💡 Suggested PR split**`);
   lines.push("");
   lines.push(
     "This change spans several distinct cohorts. Splitting it into smaller PRs would make review faster and lower the chance of regressions slipping through. A natural split:",
